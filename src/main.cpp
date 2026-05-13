@@ -7,6 +7,8 @@
 #include "config_manager.h"
 #include "display_manager.h"
 #include "leftovers_display.h"
+#include "leftovers_session.h"
+#include "leftovers_web.h"
 #include "network_manager.h"
 #include "setup_portal.h"
 #include "storage_manager.h"
@@ -90,6 +92,7 @@ void setup()
     return;
   }
 
+  startLeftoversWebServer();
   initializeLeftoversDisplay();
   renderLeftoversDisplayFull();
 }
@@ -103,12 +106,17 @@ void loop()
   }
 
   processPhotoBrightness();
+  processLeftoversWebServer();
+  processLeftoversSession();
 
   if (wifi_connected_at_boot)
   {
     processScheduledNtpSync();
   }
 
-  processLeftoversDisplay();
+  if (!isLeftoversQrActive())
+  {
+    processLeftoversDisplay();
+  }
   processTouchInput();
 }

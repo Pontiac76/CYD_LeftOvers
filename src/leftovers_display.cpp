@@ -2,6 +2,7 @@
 
 #include "app_state.h"
 #include "display_manager.h"
+#include "leftovers_session.h"
 #include "network_manager.h"
 #include "status_icon_art.h"
 
@@ -31,6 +32,7 @@ bool last_wifi_available = true;
 bool last_ntp_available = true;
 int last_ntp_failure_count = -1;
 bool last_edit_session_active = false;
+bool last_record_blink_on = false;
 bool last_cached_data_dirty = false;
 
 extern bool wifi_connected_at_boot;
@@ -73,7 +75,7 @@ String formatLosDateTime(const struct tm &localtime)
 
 void renderDateTimeRegion(const struct tm *localtime)
 {
-  logSpriteMemory("datetime", "before-create");
+  //logSpriteMemory("datetime", "before-create");
 
   TFT_eSprite sprite = TFT_eSprite(&tft);
   if (!sprite.createSprite(tft.width(), DATETIME_REGION_H))
@@ -82,7 +84,7 @@ void renderDateTimeRegion(const struct tm *localtime)
     return;
   }
 
-  logSpriteMemory("datetime", "after-create");
+  //logSpriteMemory("datetime", "after-create");
 
   sprite.fillSprite(TFT_BLACK);
   sprite.setTextDatum(MC_DATUM);
@@ -102,12 +104,12 @@ void renderDateTimeRegion(const struct tm *localtime)
   sprite.pushSprite(DATETIME_REGION_X, DATETIME_REGION_Y);
   sprite.deleteSprite();
 
-  logSpriteMemory("datetime", "after-delete");
+  //logSpriteMemory("datetime", "after-delete");
 }
 
 void renderListRegion()
 {
-  logSpriteMemory("list", "before-create");
+  //logSpriteMemory("list", "before-create");
 
   TFT_eSprite sprite = TFT_eSprite(&tft);
   if (!sprite.createSprite(tft.width(), LIST_REGION_H))
@@ -116,7 +118,7 @@ void renderListRegion()
     return;
   }
 
-  logSpriteMemory("list", "after-create");
+  //logSpriteMemory("list", "after-create");
 
   sprite.fillSprite(TFT_BLACK);
   sprite.setTextDatum(TL_DATUM);
@@ -129,7 +131,7 @@ void renderListRegion()
   sprite.pushSprite(LIST_REGION_X, LIST_REGION_Y);
   sprite.deleteSprite();
 
-  logSpriteMemory("list", "after-delete");
+  //logSpriteMemory("list", "after-delete");
 }
 
 int getIconWidth(const char *const rows[], int rowCount)
@@ -184,6 +186,16 @@ void drawThresholdIcon(TFT_eSprite &sprite,
   }
 }
 
+bool isRecordBlinkOn()
+{
+  return ((millis() / 500UL) % 2UL) == 0;
+}
+
+bool shouldShowEditSessionActive()
+{
+  return isLeftoversSessionActive() && !isLeftoversQrActive();
+}
+
 int getWifiSignalLevel()
 {
   if (!wifi_connected_at_boot || WiFi.status() != WL_CONNECTED)
@@ -205,7 +217,8 @@ void renderStatusRegion()
   uint16_t inactiveColor = createColor(55, 55, 55);
   uint16_t secondaryColor = createColor(120, 120, 120);
   uint16_t ntpColor = goodColor;
-  bool editSessionActive = false;
+  bool editSessionActive = shouldShowEditSessionActive();
+  bool recordBlinkOn = isRecordBlinkOn();
   bool cachedDataDirty = false;
 
   if (!ntp_ever_synced || consecutive_ntp_failures >= 3)
@@ -217,7 +230,7 @@ void renderStatusRegion()
     ntpColor = warnColor;
   }
 
-  logSpriteMemory("status", "before-create");
+  //logSpriteMemory("status", "before-create");
 
   TFT_eSprite sprite = TFT_eSprite(&tft);
   if (!sprite.createSprite(tft.width(), STATUS_REGION_H))
@@ -226,7 +239,7 @@ void renderStatusRegion()
     return;
   }
 
-  logSpriteMemory("status", "after-create");
+  //logSpriteMemory("status", "after-create");
 
   sprite.fillSprite(TFT_BLACK);
 
@@ -260,7 +273,7 @@ void renderStatusRegion()
                     RECORD_ICON,
                     RECORD_ICON_ROWS,
                     9,
-                    editSessionActive ? badColor : inactiveColor,
+                    (editSessionActive && recordBlinkOn) ? badColor : inactiveColor,
                     inactiveColor,
                     secondaryColor);
 
@@ -278,7 +291,7 @@ void renderStatusRegion()
   sprite.pushSprite(STATUS_REGION_X, statusY);
   sprite.deleteSprite();
 
-  logSpriteMemory("status", "after-delete");
+  //logSpriteMemory("status", "after-delete");
 }
 
 bool getCurrentLocalTime(struct tm &localtime)
@@ -310,6 +323,8 @@ void initializeLeftoversDisplay()
   last_wifi_available = wifi_connected_at_boot;
   last_ntp_available = ntp_synced_at_boot;
   last_ntp_failure_count = consecutive_ntp_failures;
+  last_edit_session_active = shouldShowEditSessionActive();
+  last_record_blink_on = isRecordBlinkOn();
 }
 
 void renderLeftoversDisplayFull()
@@ -335,6 +350,8 @@ void renderLeftoversDisplayFull()
   last_wifi_available = wifi_connected_at_boot;
   last_ntp_available = ntp_synced_at_boot;
   last_ntp_failure_count = consecutive_ntp_failures;
+  last_edit_session_active = shouldShowEditSessionActive();
+  last_record_blink_on = isRecordBlinkOn();
   full_draw_required = false;
 }
 
@@ -343,6 +360,8 @@ void processLeftoversDisplay()
   struct tm localtime;
   bool timeAvailable;
   bool statusChanged;
+  bool editSessionActive;
+  bool recordBlinkOn;
 
   if (full_draw_required)
   {
@@ -357,14 +376,20 @@ void processLeftoversDisplay()
     rememberDrawnDateTime(localtime);
   }
 
+  editSessionActive = shouldShowEditSessionActive();
+  recordBlinkOn = isRecordBlinkOn();
   statusChanged = (last_wifi_available != wifi_connected_at_boot) ||
                   (last_ntp_available != ntp_synced_at_boot) ||
-                  (last_ntp_failure_count != consecutive_ntp_failures);
+                  (last_ntp_failure_count != consecutive_ntp_failures) ||
+                  (last_edit_session_active != editSessionActive) ||
+                  (editSessionActive && (last_record_blink_on != recordBlinkOn));
   if (statusChanged)
   {
     renderStatusRegion();
     last_wifi_available = wifi_connected_at_boot;
     last_ntp_available = ntp_synced_at_boot;
     last_ntp_failure_count = consecutive_ntp_failures;
+    last_edit_session_active = editSessionActive;
+    last_record_blink_on = recordBlinkOn;
   }
 }
