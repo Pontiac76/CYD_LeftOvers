@@ -19,6 +19,28 @@ int ntp_retry_frequency_minutes = 15;
 int ntp_retry_random_delay_seconds = 15 * 60;
 unsigned long next_ntp_sync_ms = 0;
 bool ntp_sync_scheduled = false;
+unsigned long last_ntp_success_ms = 0;
+int consecutive_ntp_failures = 0;
+bool ntp_last_sync_succeeded = false;
+bool ntp_ever_synced = false;
+
+void recordNtpSyncResult(bool syncSucceeded)
+{
+  ntp_last_sync_succeeded = syncSucceeded;
+  if (syncSucceeded)
+  {
+    last_ntp_success_ms = millis();
+    consecutive_ntp_failures = 0;
+    ntp_ever_synced = true;
+    Serial.println("NTP health: sync OK");
+  }
+  else
+  {
+    ++consecutive_ntp_failures;
+    Serial.print("NTP health: sync failed count=");
+    Serial.println(consecutive_ntp_failures);
+  }
+}
 
 bool wifi_start_STA() //Start WiFi Mode STA
 {
@@ -160,6 +182,7 @@ void processScheduledNtpSync()
   }
 
   bool syncSucceeded = timesync(false);
+  recordNtpSyncResult(syncSucceeded);
   scheduleNextNtpSync(syncSucceeded);
 }
 

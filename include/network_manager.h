@@ -7,7 +7,13 @@ constexpr unsigned long MINUTE_MS = 60UL * 1000UL;
 constexpr int MAX_NTP_RANDOM_DELAY_SECONDS = 24 * 60 * 60;
 
 bool wifi_start_STA();
+extern unsigned long last_ntp_success_ms;
+extern int consecutive_ntp_failures;
+extern bool ntp_last_sync_succeeded;
+extern bool ntp_ever_synced;
+
 bool timesync(bool drawStatus = true);
+void recordNtpSyncResult(bool syncSucceeded);
 unsigned long computeNtpDelayMs(int baseMinutes, int randomDelaySeconds);
 void scheduleNextNtpSync(bool lastSyncSucceeded);
 void processScheduledNtpSync();
