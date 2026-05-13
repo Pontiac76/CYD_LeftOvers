@@ -21,6 +21,8 @@ constexpr int STATUS_REGION_X = 0;
 constexpr int STATUS_REGION_H = 24;
 constexpr int STATUS_ICON_Y = 4;
 constexpr int STATUS_ICON_GAP = 10;
+constexpr unsigned long WIFI_RSSI_SAMPLE_MS = 500;
+constexpr int WIFI_RSSI_SAMPLE_COUNT = 10;
 
 int last_drawn_year = -1;
 int last_drawn_mon = -1;
@@ -34,6 +36,12 @@ int last_ntp_failure_count = -1;
 bool last_edit_session_active = false;
 bool last_record_blink_on = false;
 bool last_cached_data_dirty = false;
+int wifi_rssi_samples[WIFI_RSSI_SAMPLE_COUNT];
+int wifi_rssi_sample_index = 0;
+int wifi_rssi_sample_count = 0;
+unsigned long next_wifi_rssi_sample_ms = 0;
+int averaged_wifi_signal_level = -1;
+int last_rendered_wifi_signal_level = -99;
 
 extern bool wifi_connected_at_boot;
 extern bool ntp_synced_at_boot;
@@ -196,16 +204,68 @@ bool shouldShowEditSessionActive()
   return isLeftoversSessionActive() && !isLeftoversQrActive();
 }
 
-int getWifiSignalLevel()
+int mapRssiToSignalLevel(int rssi)
 {
-  if (!wifi_connected_at_boot || WiFi.status() != WL_CONNECTED)
-  {
-    return -1;
-  }
-
-  int rssi = WiFi.RSSI();
   int level = map(constrain(rssi, -90, -50), -90, -50, 0, 9);
   return constrain(level, 0, 9);
+}
+
+void resetWifiRssiSamples()
+{
+  wifi_rssi_sample_index = 0;
+  wifi_rssi_sample_count = 0;
+  averaged_wifi_signal_level = -1;
+}
+
+void updateAveragedWifiSignalLevel()
+{
+  if (wifi_rssi_sample_count <= 0)
+  {
+    averaged_wifi_signal_level = -1;
+    return;
+  }
+
+  long sum = 0;
+  for (int index = 0; index < wifi_rssi_sample_count; ++index)
+  {
+    sum += wifi_rssi_samples[index];
+  }
+
+  averaged_wifi_signal_level = mapRssiToSignalLevel(int(sum / wifi_rssi_sample_count));
+}
+
+void processWifiRssiSampling()
+{
+  unsigned long nowMs = millis();
+  if (long(nowMs - next_wifi_rssi_sample_ms) < 0)
+  {
+    return;
+  }
+
+  next_wifi_rssi_sample_ms = nowMs + WIFI_RSSI_SAMPLE_MS;
+
+  if (!wifi_connected_at_boot || WiFi.status() != WL_CONNECTED)
+  {
+    if (averaged_wifi_signal_level != -1 || wifi_rssi_sample_count > 0)
+    {
+      resetWifiRssiSamples();
+    }
+    return;
+  }
+
+  wifi_rssi_samples[wifi_rssi_sample_index] = WiFi.RSSI();
+  wifi_rssi_sample_index = (wifi_rssi_sample_index + 1) % WIFI_RSSI_SAMPLE_COUNT;
+  if (wifi_rssi_sample_count < WIFI_RSSI_SAMPLE_COUNT)
+  {
+    ++wifi_rssi_sample_count;
+  }
+
+  updateAveragedWifiSignalLevel();
+}
+
+int getWifiSignalLevel()
+{
+  return averaged_wifi_signal_level;
 }
 
 void renderStatusRegion()
@@ -325,6 +385,7 @@ void initializeLeftoversDisplay()
   last_ntp_failure_count = consecutive_ntp_failures;
   last_edit_session_active = shouldShowEditSessionActive();
   last_record_blink_on = isRecordBlinkOn();
+  last_rendered_wifi_signal_level = averaged_wifi_signal_level;
 }
 
 void renderLeftoversDisplayFull()
@@ -352,6 +413,7 @@ void renderLeftoversDisplayFull()
   last_ntp_failure_count = consecutive_ntp_failures;
   last_edit_session_active = shouldShowEditSessionActive();
   last_record_blink_on = isRecordBlinkOn();
+  last_rendered_wifi_signal_level = averaged_wifi_signal_level;
   full_draw_required = false;
 }
 
@@ -362,6 +424,8 @@ void processLeftoversDisplay()
   bool statusChanged;
   bool editSessionActive;
   bool recordBlinkOn;
+
+  processWifiRssiSampling();
 
   if (full_draw_required)
   {
@@ -381,6 +445,7 @@ void processLeftoversDisplay()
   statusChanged = (last_wifi_available != wifi_connected_at_boot) ||
                   (last_ntp_available != ntp_synced_at_boot) ||
                   (last_ntp_failure_count != consecutive_ntp_failures) ||
+                  (last_rendered_wifi_signal_level != averaged_wifi_signal_level) ||
                   (last_edit_session_active != editSessionActive) ||
                   (editSessionActive && (last_record_blink_on != recordBlinkOn));
   if (statusChanged)
@@ -391,5 +456,6 @@ void processLeftoversDisplay()
     last_ntp_failure_count = consecutive_ntp_failures;
     last_edit_session_active = editSessionActive;
     last_record_blink_on = recordBlinkOn;
+    last_rendered_wifi_signal_level = averaged_wifi_signal_level;
   }
 }
