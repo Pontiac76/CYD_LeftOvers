@@ -2,6 +2,7 @@
 
 #include "app_state.h"
 #include "display_manager.h"
+#include "leftovers_data.h"
 #include "leftovers_session.h"
 #include "network_manager.h"
 #include "status_icon_art.h"
@@ -24,6 +25,9 @@ constexpr int STATUS_ICON_GAP = 10;
 constexpr unsigned long WIFI_RSSI_SAMPLE_MS = 500;
 constexpr int WIFI_RSSI_SAMPLE_COUNT = 10;
 
+int last_rendered_list_year = -1;
+int last_rendered_list_mon = -1;
+int last_rendered_list_mday = -1;
 int last_drawn_year = -1;
 int last_drawn_mon = -1;
 int last_drawn_mday = -1;
@@ -32,10 +36,12 @@ int last_drawn_min = -1;
 bool full_draw_required = true;
 bool last_wifi_available = true;
 bool last_ntp_available = true;
+bool last_ntp_ever_synced = false;
 int last_ntp_failure_count = -1;
 bool last_edit_session_active = false;
 bool last_record_blink_on = false;
 bool last_cached_data_dirty = false;
+String last_reboot_age_label;
 int wifi_rssi_samples[WIFI_RSSI_SAMPLE_COUNT];
 int wifi_rssi_sample_index = 0;
 int wifi_rssi_sample_count = 0;
@@ -115,6 +121,68 @@ void renderDateTimeRegion(const struct tm *localtime)
   //logSpriteMemory("datetime", "after-delete");
 }
 
+int drawWrappedText(TFT_eSprite &sprite, const String &text, int x, int y, int maxWidth, int maxY, int lineHeight)
+{
+  String line;
+  int start = 0;
+
+  while (start < text.length())
+  {
+    int separator = text.indexOf(' ', start);
+    String word;
+    if (separator == -1)
+    {
+      word = text.substring(start);
+      start = text.length();
+    }
+    else
+    {
+      word = text.substring(start, separator);
+      start = separator + 1;
+    }
+
+    if (word == "")
+    {
+      continue;
+    }
+
+    String candidate = line == "" ? word : line + " " + word;
+    if (sprite.textWidth(candidate, 2) > maxWidth && line != "")
+    {
+      if (y > maxY) return y;
+      sprite.drawString(line, x, y, 2);
+      y += lineHeight;
+      line = word;
+    }
+    else
+    {
+      line = candidate;
+    }
+  }
+
+  if (line != "" && y <= maxY)
+  {
+    sprite.drawString(line, x, y, 2);
+    y += lineHeight;
+  }
+
+  return y;
+}
+
+void rememberRenderedListDate(const struct tm &localtime)
+{
+  last_rendered_list_year = localtime.tm_year;
+  last_rendered_list_mon = localtime.tm_mon;
+  last_rendered_list_mday = localtime.tm_mday;
+}
+
+bool renderedListDateChanged(const struct tm &localtime)
+{
+  return (localtime.tm_year != last_rendered_list_year) ||
+         (localtime.tm_mon != last_rendered_list_mon) ||
+         (localtime.tm_mday != last_rendered_list_mday);
+}
+
 void renderListRegion()
 {
   //logSpriteMemory("list", "before-create");
@@ -131,10 +199,52 @@ void renderListRegion()
   sprite.fillSprite(TFT_BLACK);
   sprite.setTextDatum(TL_DATUM);
   sprite.setTextFont(2);
-  sprite.setTextSize(2);
+  sprite.setTextSize(1);
   sprite.setTextColor(scheduleTextColor, TFT_BLACK);
-  sprite.drawString("No leftovers", 6, 6, 2);
-  sprite.drawString("listed", 6, 42, 2);
+
+  if (leftover_item_count <= 0)
+  {
+    sprite.setTextSize(2);
+    sprite.drawString("No leftovers", 6, 6, 2);
+    sprite.drawString("listed", 6, 42, 2);
+  }
+  else
+  {
+    int y = 2;
+    String currentDate;
+    String items;
+    for (int i = 0; i <= leftover_item_count; ++i)
+    {
+      bool flush = (i == leftover_item_count) || (leftover_items[i].date != currentDate);
+      if (flush && currentDate != "")
+      {
+        sprite.setTextSize(1);
+        sprite.setTextColor(dateTextColor, TFT_BLACK);
+        sprite.drawString(displayDateHeading(currentDate), 6, y, 2);
+        y += 18;
+        sprite.setTextColor(scheduleTextColor, TFT_BLACK);
+        y = drawWrappedText(sprite, items, 10, y, sprite.width() - 16, LIST_REGION_H - 16, 16);
+        y += 4;
+        if (y > LIST_REGION_H - 18) break;
+      }
+      if (i < leftover_item_count && (currentDate == "" || leftover_items[i].date != currentDate))
+      {
+        currentDate = leftover_items[i].date;
+        items = "";
+      }
+      if (i < leftover_item_count)
+      {
+        if (items != "") items += ", ";
+        items += displayFoodName(leftover_items[i].name);
+      }
+    }
+  }
+
+  struct tm localtime;
+  if (getLocalTime(&localtime, 20))
+  {
+    rememberRenderedListDate(localtime);
+  }
 
   sprite.pushSprite(LIST_REGION_X, LIST_REGION_Y);
   sprite.deleteSprite();
@@ -204,6 +314,46 @@ bool shouldShowEditSessionActive()
   return isLeftoversSessionActive() && !isLeftoversQrActive();
 }
 
+String formatLastRebootAge()
+{
+  unsigned long minutes = millis() / 60000UL;
+  unsigned long value;
+  const char *unit;
+
+  if (minutes < 60UL)
+  {
+    value = minutes;
+    unit = "min";
+  }
+  else if (minutes < 24UL * 60UL)
+  {
+    value = minutes / 60UL;
+    unit = "hr";
+  }
+  else if (minutes < 7UL * 24UL * 60UL)
+  {
+    value = minutes / (24UL * 60UL);
+    unit = "day";
+  }
+  else if (minutes < 30UL * 24UL * 60UL)
+  {
+    value = minutes / (7UL * 24UL * 60UL);
+    unit = "wk";
+  }
+  else
+  {
+    value = minutes / (30UL * 24UL * 60UL);
+    unit = "mo";
+  }
+
+  String text= "";
+  text += String(value);
+  text += " ";
+  text += unit;
+  text += " up";
+  return text;
+}
+
 int mapRssiToSignalLevel(int rssi)
 {
   int level = map(constrain(rssi, -90, -50), -90, -50, 0, 9);
@@ -271,15 +421,16 @@ int getWifiSignalLevel()
 void renderStatusRegion()
 {
   int statusY = tft.height() - STATUS_REGION_H;
-  uint16_t goodColor = createColor(0, 220, 80);
+  uint16_t goodColor = createColor(0, 255, 0);
   uint16_t warnColor = createColor(255, 190, 0);
-  uint16_t badColor = createColor(255, 60, 60);
+  uint16_t badColor = createColor(255, 0, 0);
   uint16_t inactiveColor = createColor(55, 55, 55);
   uint16_t secondaryColor = createColor(120, 120, 120);
   uint16_t ntpColor = goodColor;
   bool editSessionActive = shouldShowEditSessionActive();
   bool recordBlinkOn = isRecordBlinkOn();
   bool cachedDataDirty = false;
+  String rebootAge = formatLastRebootAge();
 
   if (!ntp_ever_synced || consecutive_ntp_failures >= 3)
   {
@@ -348,6 +499,21 @@ void renderStatusRegion()
                     inactiveColor,
                     secondaryColor);
 
+  x += getIconWidth(DIRTY_ICON, DIRTY_ICON_ROWS) + STATUS_ICON_GAP;
+  sprite.setTextDatum(ML_DATUM);
+  sprite.setTextFont(1);
+  sprite.setTextSize(1);
+  sprite.setTextColor(statusTextColor, TFT_BLACK);
+  int textWidth = sprite.width() - x - 4;
+  if (textWidth > 20)
+  {
+    while (rebootAge.length() > 0 && sprite.textWidth(rebootAge, 1) > textWidth)
+    {
+      rebootAge.remove(rebootAge.length() - 1);
+    }
+    sprite.drawString(rebootAge, x, STATUS_REGION_H / 2, 1);
+  }
+
   sprite.pushSprite(STATUS_REGION_X, statusY);
   sprite.deleteSprite();
 
@@ -382,9 +548,11 @@ void initializeLeftoversDisplay()
   full_draw_required = true;
   last_wifi_available = wifi_connected_at_boot;
   last_ntp_available = ntp_synced_at_boot;
+  last_ntp_ever_synced = ntp_ever_synced;
   last_ntp_failure_count = consecutive_ntp_failures;
   last_edit_session_active = shouldShowEditSessionActive();
   last_record_blink_on = isRecordBlinkOn();
+  last_reboot_age_label = formatLastRebootAge();
   last_rendered_wifi_signal_level = averaged_wifi_signal_level;
 }
 
@@ -410,9 +578,11 @@ void renderLeftoversDisplayFull()
 
   last_wifi_available = wifi_connected_at_boot;
   last_ntp_available = ntp_synced_at_boot;
+  last_ntp_ever_synced = ntp_ever_synced;
   last_ntp_failure_count = consecutive_ntp_failures;
   last_edit_session_active = shouldShowEditSessionActive();
   last_record_blink_on = isRecordBlinkOn();
+  last_reboot_age_label = formatLastRebootAge();
   last_rendered_wifi_signal_level = averaged_wifi_signal_level;
   full_draw_required = false;
 }
@@ -424,6 +594,7 @@ void processLeftoversDisplay()
   bool statusChanged;
   bool editSessionActive;
   bool recordBlinkOn;
+  String rebootAge;
 
   processWifiRssiSampling();
 
@@ -440,12 +611,20 @@ void processLeftoversDisplay()
     rememberDrawnDateTime(localtime);
   }
 
+  if (timeAvailable && renderedListDateChanged(localtime))
+  {
+    renderListRegion();
+  }
+
   editSessionActive = shouldShowEditSessionActive();
   recordBlinkOn = isRecordBlinkOn();
+  rebootAge = formatLastRebootAge();
   statusChanged = (last_wifi_available != wifi_connected_at_boot) ||
                   (last_ntp_available != ntp_synced_at_boot) ||
+                  (last_ntp_ever_synced != ntp_ever_synced) ||
                   (last_ntp_failure_count != consecutive_ntp_failures) ||
                   (last_rendered_wifi_signal_level != averaged_wifi_signal_level) ||
+                  (last_reboot_age_label != rebootAge) ||
                   (last_edit_session_active != editSessionActive) ||
                   (editSessionActive && (last_record_blink_on != recordBlinkOn));
   if (statusChanged)
@@ -453,9 +632,11 @@ void processLeftoversDisplay()
     renderStatusRegion();
     last_wifi_available = wifi_connected_at_boot;
     last_ntp_available = ntp_synced_at_boot;
+    last_ntp_ever_synced = ntp_ever_synced;
     last_ntp_failure_count = consecutive_ntp_failures;
     last_edit_session_active = editSessionActive;
     last_record_blink_on = recordBlinkOn;
+    last_reboot_age_label = rebootAge;
     last_rendered_wifi_signal_level = averaged_wifi_signal_level;
   }
 }

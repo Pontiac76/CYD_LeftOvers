@@ -26,6 +26,7 @@ extern String WeekDays[];
 extern String MonthName[];
 extern String ScheduleEntries[MAX_SCHEDULE_ENTRIES];
 extern String current_config_text;
+extern String active_config_source;
 extern String system_id;
 extern String system_id_list[];
 extern int system_id_count;

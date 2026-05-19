@@ -6,6 +6,7 @@
 #include "brightness_manager.h"
 #include "config_manager.h"
 #include "display_manager.h"
+#include "leftovers_data.h"
 #include "leftovers_display.h"
 #include "leftovers_session.h"
 #include "leftovers_web.h"
@@ -92,6 +93,9 @@ void setup()
     return;
   }
 
+  loadKnownFoodsFromDisk();
+  loadLeftoversFromDisk();
+
   startLeftoversWebServer();
   initializeLeftoversDisplay();
   renderLeftoversDisplayFull();
@@ -114,7 +118,7 @@ void loop()
     processScheduledNtpSync();
   }
 
-  if (!isLeftoversQrActive())
+  if (!isLeftoversAnyQrActive())
   {
     processLeftoversDisplay();
   }

@@ -3,6 +3,7 @@
 #include "app_state.h"
 #include "brightness_manager.h"
 #include "display_manager.h"
+#include "leftovers_session.h"
 #include "network_manager.h"
 #include "schedule_display.h"
 #include "storage_manager.h"
@@ -30,6 +31,7 @@ String MonthName[MONTH_COUNT] = {
 };
 String ScheduleEntries[MAX_SCHEDULE_ENTRIES];
 String current_config_text;
+String active_config_source;
 String system_id;
 String system_id_list[MAX_SYSTEM_ID_COUNT];
 int system_id_count = 0;
@@ -476,6 +478,12 @@ void parseConfigLine(String line)
     ntp_retry_frequency_minutes = int(max(1L, value.toInt()));
   } else if (configKeyEquals(key, "ntpretryrandomseconds")) {
     ntp_retry_random_delay_seconds = int(min(long(MAX_NTP_RANDOM_DELAY_SECONDS), max(0L, value.toInt())));
+  } else if (configKeyEquals(key, "editsessionminutes")) {
+    edit_session_minutes = int(min(240L, max(1L, long(value.toInt()))));
+  } else if (configKeyEquals(key, "adminsessionminutes")) {
+    admin_session_minutes = int(min(240L, max(1L, long(value.toInt()))));
+  } else if (configKeyEquals(key, "qrvisibleseconds")) {
+    qr_visible_seconds = int(min(600L, max(10L, long(value.toInt()))));
   } else if (configKeyEquals(key, "tformat")) {
     tformat = value;
   } else if (configKeyEquals(key, "brightness")) {
@@ -798,28 +806,33 @@ void read_sd()
   {
     if (read_config_text_from_littlefs(current_config_text))
     {
+      active_config_source = "LittleFS /config.txt";
       Serial.println("RAM_ONLY: Using LittleFS /config.txt");
       apply_config_from_string(current_config_text);
     }
     else
     {
       current_config_text = "";
+      active_config_source = "defaults";
       Serial.println("RAM_ONLY: LittleFS /config.txt missing -- Using Defaults.");
     }
   }
   else if (read_config_text_from_sd(current_config_text))
   {
+    active_config_source = "SD /config.txt";
     Serial.println("Config source: SD /config.txt");
     apply_config_from_string(current_config_text);
   }
   else if (read_config_text_from_littlefs(current_config_text))
   {
+    active_config_source = "LittleFS /config.txt";
     Serial.println("Config source: LittleFS /config.txt");
     apply_config_from_string(current_config_text);
   }
   else
   {
     current_config_text = "";
+    active_config_source = "defaults";
     Serial.println("Config source: defaults (/config.txt missing on SD and LittleFS)");
   }
   Serial.println("read_sd: End");

@@ -12,6 +12,9 @@ extern int consecutive_ntp_failures;
 extern bool ntp_last_sync_succeeded;
 extern bool ntp_ever_synced;
 
+bool isLocalTimePlausible(const struct tm &local);
+String getPrimaryNtpServer();
+bool queryNtpServerAndSetClock(struct tm &local, unsigned long timeoutMs);
 bool timesync(bool drawStatus = true);
 void recordNtpSyncResult(bool syncSucceeded);
 unsigned long computeNtpDelayMs(int baseMinutes, int randomDelaySeconds);

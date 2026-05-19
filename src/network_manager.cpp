@@ -8,15 +8,17 @@
 #include <HTTPClient.h>
 #include <TFT_eSPI.h>
 #include <WiFi.h>
+#include <WiFiUdp.h>
 #include <esp_system.h>
+#include <sys/time.h>
 #include <time.h>
 
 unsigned long next_update_check = 0;
 int next_update_modular = 15;
-int ntp_sync_frequency_minutes = 60;
-int ntp_sync_random_delay_seconds = 60 * 60;
-int ntp_retry_frequency_minutes = 15;
-int ntp_retry_random_delay_seconds = 15 * 60;
+int ntp_sync_frequency_minutes = 1;
+int ntp_sync_random_delay_seconds = 0;
+int ntp_retry_frequency_minutes = 1;
+int ntp_retry_random_delay_seconds = 0;
 unsigned long next_ntp_sync_ms = 0;
 bool ntp_sync_scheduled = false;
 unsigned long last_ntp_success_ms = 0;
@@ -93,6 +95,156 @@ bool wifi_start_STA() //Start WiFi Mode STA
   return 1;
 }
 
+bool isLocalTimePlausible(const struct tm &local)
+{
+  return (local.tm_year + 1900) >= 2024;
+}
+
+String getPrimaryNtpServer()
+{
+  String server = ntpserver;
+  server.trim();
+
+  int commaIndex = server.indexOf(',');
+  if (commaIndex >= 0)
+  {
+    server = server.substring(0, commaIndex);
+    server.trim();
+  }
+
+  int spaceIndex = server.indexOf(' ');
+  if (spaceIndex >= 0)
+  {
+    server = server.substring(0, spaceIndex);
+    server.trim();
+  }
+
+  return server;
+}
+
+bool queryNtpServerAndSetClock(struct tm &local, unsigned long timeoutMs)
+{
+  constexpr unsigned long NTP_UNIX_EPOCH_OFFSET = 2208988800UL;
+  constexpr int NTP_PACKET_SIZE = 48;
+
+  String server = getPrimaryNtpServer();
+  Serial.println("[NTP] query begin");
+  Serial.print("[NTP] configured server='");
+  Serial.print(ntpserver);
+  Serial.print("' primary='");
+  Serial.print(server);
+  Serial.println("'");
+  Serial.print("[NTP] timeoutMs=");
+  Serial.print(timeoutMs);
+  Serial.print(" wifiStatus=");
+  Serial.println(WiFi.status());
+
+  if (server == "")
+  {
+    Serial.println("[NTP] server is not configured");
+    return false;
+  }
+
+  IPAddress ntpAddress;
+  if (!WiFi.hostByName(server.c_str(), ntpAddress))
+  {
+    Serial.print("[NTP] DNS/host lookup failed: ");
+    Serial.println(server);
+    return false;
+  }
+
+  Serial.print("[NTP] target ");
+  Serial.print(server);
+  Serial.print(" -> ");
+  Serial.println(ntpAddress);
+
+  uint8_t packetBuffer[NTP_PACKET_SIZE] = {0};
+  packetBuffer[0] = 0b11100011; // LI, Version, Mode
+  packetBuffer[1] = 0;          // Stratum
+  packetBuffer[2] = 6;          // Polling Interval
+  packetBuffer[3] = 0xEC;       // Peer Clock Precision
+  packetBuffer[12] = 49;
+  packetBuffer[13] = 0x4E;
+  packetBuffer[14] = 49;
+  packetBuffer[15] = 52;
+
+  WiFiUDP udp;
+  uint16_t localPort = uint16_t(random(49152, 65535));
+  Serial.print("[NTP] udp begin localPort=");
+  Serial.println(localPort);
+  if (!udp.begin(localPort))
+  {
+    Serial.println("[NTP] UDP begin failed");
+    return false;
+  }
+
+  Serial.println("[NTP] sending UDP packet to port 123");
+  udp.beginPacket(ntpAddress, 123);
+  udp.write(packetBuffer, NTP_PACKET_SIZE);
+  if (!udp.endPacket())
+  {
+    Serial.println("[NTP] UDP send failed");
+    udp.stop();
+    return false;
+  }
+
+  unsigned long startMs = millis();
+  while (millis() - startMs < timeoutMs)
+  {
+    int packetSize = udp.parsePacket();
+    if (packetSize > 0)
+    {
+      Serial.print("[NTP] UDP packet received size=");
+      Serial.println(packetSize);
+    }
+
+    if (packetSize >= NTP_PACKET_SIZE)
+    {
+      udp.read(packetBuffer, NTP_PACKET_SIZE);
+      udp.stop();
+
+      Serial.print("[NTP] response LI/VN/mode=0x");
+      Serial.print(packetBuffer[0], HEX);
+      Serial.print(" stratum=");
+      Serial.println(packetBuffer[1]);
+
+      unsigned long highWord = word(packetBuffer[40], packetBuffer[41]);
+      unsigned long lowWord = word(packetBuffer[42], packetBuffer[43]);
+      unsigned long ntpSeconds = (highWord << 16) | lowWord;
+      Serial.print("[NTP] raw seconds=");
+      Serial.print(ntpSeconds);
+      Serial.print(" unix=");
+      Serial.println(ntpSeconds > NTP_UNIX_EPOCH_OFFSET ? ntpSeconds - NTP_UNIX_EPOCH_OFFSET : 0);
+      if (ntpSeconds <= NTP_UNIX_EPOCH_OFFSET)
+      {
+        Serial.println("[NTP] response timestamp invalid");
+        return false;
+      }
+
+      time_t unixSeconds = time_t(ntpSeconds - NTP_UNIX_EPOCH_OFFSET);
+      timeval tv = { unixSeconds, 0 };
+      settimeofday(&tv, nullptr);
+      setenv("TZ", tzinfo.c_str(), 1);
+      tzset();
+      localtime_r(&unixSeconds, &local);
+      Serial.println(&local, "[NTP] local after set: %Y-%m-%d %H:%M:%S");
+      bool plausible = isLocalTimePlausible(local);
+      Serial.print("[NTP] plausible=");
+      Serial.println(plausible ? "true" : "false");
+      return plausible;
+    }
+    delay(10);
+  }
+
+  udp.stop();
+  Serial.print("[NTP] query timed out: ");
+  Serial.print(server);
+  Serial.print(" after ");
+  Serial.print(timeoutMs);
+  Serial.println("ms");
+  return false;
+}
+
 bool timesync(bool drawStatus)
 {
   bool exit_status = 1;
@@ -104,8 +256,7 @@ bool timesync(bool drawStatus)
   if (WiFi.status() == WL_CONNECTED)
   {
     struct tm local;
-    configTzTime(tzinfo.c_str(), ntpserver.c_str()); // Synchronize ESP32 system time with NTP
-    if (!getLocalTime(&local, 10000)) // Try to synchronize for 10 seconds
+    if (!queryNtpServerAndSetClock(local, 10000)) // Explicitly query NTP; local clock alone is not proof NTP is alive.
     {
       Serial.println("Timeserver cannot be reached !!!");
       if (drawStatus)
@@ -154,13 +305,25 @@ unsigned long computeNtpDelayMs(int baseMinutes, int randomDelaySeconds)
 
 void scheduleNextNtpSync(bool lastSyncSucceeded)
 {
-  unsigned long delayMs = lastSyncSucceeded
-                            ? computeNtpDelayMs(ntp_sync_frequency_minutes, ntp_sync_random_delay_seconds)
-                            : computeNtpDelayMs(ntp_retry_frequency_minutes, ntp_retry_random_delay_seconds);
+  int baseMinutes = lastSyncSucceeded ? ntp_sync_frequency_minutes : ntp_retry_frequency_minutes;
+  int randomSeconds = lastSyncSucceeded ? ntp_sync_random_delay_seconds : ntp_retry_random_delay_seconds;
+
+  Serial.print("[NTP] schedule request lastSyncSucceeded=");
+  Serial.print(lastSyncSucceeded ? "true" : "false");
+  Serial.print(" configuredBaseMinutes=");
+  Serial.print(baseMinutes);
+  Serial.print(" configuredRandomSeconds=");
+  Serial.println(randomSeconds);
+
+  unsigned long delayMs = computeNtpDelayMs(baseMinutes, randomSeconds);
 
   next_ntp_sync_ms = millis() + delayMs;
   ntp_sync_scheduled = true;
 
+  Serial.print("[NTP] effective schedule baseMinutes=");
+  Serial.print(baseMinutes);
+  Serial.print(" randomSeconds=");
+  Serial.println(randomSeconds);
   Serial.print("Next NTP sync in ");
   Serial.print(delayMs / 60000UL);
   Serial.print("m ");
@@ -170,18 +333,49 @@ void scheduleNextNtpSync(bool lastSyncSucceeded)
 
 void processScheduledNtpSync()
 {
+  static unsigned long nextWaitingLogMs = 0;
+
+  if (!ntp_ever_synced)
+  {
+    struct tm local;
+    if (getLocalTime(&local, 10) && isLocalTimePlausible(local))
+    {
+      Serial.println("[NTP] background/local time became plausible before explicit poll");
+      Serial.println(&local, "[NTP] local clock says: %Y-%m-%d %H:%M:%S");
+    }
+  }
+
   if (!ntp_sync_scheduled)
   {
-    scheduleNextNtpSync(true);
+    Serial.println("[NTP] no scheduled sync; scheduling one");
+    scheduleNextNtpSync(ntp_ever_synced);
     return;
   }
 
-  if (long(millis() - next_ntp_sync_ms) < 0)
+  long msUntilSync = long(next_ntp_sync_ms - millis());
+  if (msUntilSync > 0)
   {
+    if (long(millis() - nextWaitingLogMs) >= 0)
+    {
+      Serial.print("[NTP] waiting ");
+      Serial.print(msUntilSync / 1000L);
+      Serial.print("s until next poll; everSynced=");
+      Serial.print(ntp_ever_synced ? "true" : "false");
+      Serial.print(" failures=");
+      Serial.println(consecutive_ntp_failures);
+      nextWaitingLogMs = millis() + 15000UL;
+    }
     return;
   }
+
+  Serial.print("[NTP] scheduled poll due; everSynced=");
+  Serial.print(ntp_ever_synced ? "true" : "false");
+  Serial.print(" failures=");
+  Serial.println(consecutive_ntp_failures);
 
   bool syncSucceeded = timesync(false);
+  Serial.print("[NTP] scheduled poll result=");
+  Serial.println(syncSucceeded ? "success" : "failure");
   recordNtpSyncResult(syncSucceeded);
   scheduleNextNtpSync(syncSucceeded);
 }
